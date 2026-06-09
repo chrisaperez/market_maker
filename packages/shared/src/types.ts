@@ -34,6 +34,7 @@ export interface Market {
   sharesPerOption: number;
   parValueCents: number;
   windowSeconds: number;
+  maxOwePct: number; // most a member may owe the ledger, as a % of their buy-in
   status: MarketStatus;
   openedAt: number | null;
   closesAt: number | null;
@@ -95,6 +96,14 @@ export interface Balance {
   marketId: string;
   userId: string;
   cashCents: number; // may be negative ("owes the ledger")
+}
+
+/** A member's full public ledger position in a market (everything is transparent). */
+export interface Holding {
+  userId: string;
+  username: string | null;
+  cashCents: number;
+  positions: { optionId: string; shares: number }[];
 }
 
 export interface SettlementVote {

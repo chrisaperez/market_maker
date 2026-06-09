@@ -4,7 +4,14 @@ import { hub } from '../realtime.js';
 import { cancelOrder, OrderError, placeOrder } from './engine.js';
 
 export { buildOptionBook } from './book.js';
-export { getMarketTrades, getMyOpenOrders, openMarket, sendBalance } from './engine.js';
+export {
+  getAllOpenOrders,
+  getHoldings,
+  getMarketTrades,
+  getMyOpenOrders,
+  openMarket,
+  sendBalance,
+} from './engine.js';
 
 /** Routes trading messages (place/cancel) to the FIFO matching engine. */
 export function handleOrderMessage(
@@ -21,6 +28,7 @@ export function handleOrderMessage(
         side: msg.side,
         priceCents: msg.priceCents,
         quantity: msg.quantity,
+        orderType: msg.orderType,
       });
     } else {
       cancelOrder(userId, { marketId: msg.marketId, orderId: msg.orderId });

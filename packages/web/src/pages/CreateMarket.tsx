@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { computeFairness, dollars } from '@mm/shared';
+import { computeFairness, dollars, maxDebtCents } from '@mm/shared';
 import { api } from '../lib/api';
 import { useApp } from '../lib/store';
 import { UsernameSetter } from '../components/UsernameSetter';
@@ -31,6 +31,7 @@ export default function CreateMarket() {
   const [sharesPerOption, setSharesPerOption] = useState(10);
   const [windowSeconds, setWindowSeconds] = useState(3600);
   const [customWindow, setCustomWindow] = useState(false);
+  const [maxOwePct, setMaxOwePct] = useState(40);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -56,6 +57,7 @@ export default function CreateMarket() {
         buyInCents,
         sharesPerOption,
         windowSeconds,
+        maxOwePct,
         options: options.map((o) => o.trim()).filter(Boolean),
       });
       navigate(`/m/${market.id}`);
@@ -145,6 +147,24 @@ export default function CreateMarket() {
             value={sharesPerOption}
             onChange={(e) => setSharesPerOption(Number(e.target.value))}
           />
+        </div>
+      </div>
+
+      <div>
+        <label className="text-sm text-white/70">Debt limit — how much a member can owe</label>
+        <div className="mt-1 flex items-center gap-2">
+          <input
+            type="number"
+            min={0}
+            max={500}
+            step={5}
+            className="input w-24"
+            value={maxOwePct}
+            onChange={(e) => setMaxOwePct(Math.max(0, Math.round(Number(e.target.value))))}
+          />
+          <span className="text-sm text-white/50">
+            % of buy-in · they can go as low as −{dollars(maxDebtCents(buyInCents, maxOwePct || 0))} cash
+          </span>
         </div>
       </div>
 

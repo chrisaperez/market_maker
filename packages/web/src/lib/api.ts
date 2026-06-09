@@ -32,6 +32,7 @@ export interface CreateMarketBody {
   buyInCents: number;
   sharesPerOption: number;
   windowSeconds: number;
+  maxOwePct?: number;
   options: string[];
 }
 

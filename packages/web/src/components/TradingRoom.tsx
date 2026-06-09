@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   dollars,
+  maxDebtCents,
+  type Holding,
   type Market,
   type Member,
   type OptionBook,
@@ -38,10 +40,13 @@ export function TradingRoom({
   const [trades, setTrades] = useState<Trade[]>([]);
   const [myCash, setMyCash] = useState(0);
   const [myPos, setMyPos] = useState<Record<string, number>>({});
-  const [myOrders, setMyOrders] = useState<Order[]>([]);
+  const [openOrders, setOpenOrders] = useState<Order[]>([]);
+  const [holdings, setHoldings] = useState<Holding[]>([]);
+  const [bottomTab, setBottomTab] = useState<'trades' | 'orders' | 'holdings'>('trades');
   const [settlement, setSettlement] = useState<SettlementInfo | null>(null);
   const [flash, setFlash] = useState('');
   const flashTimer = useRef<number | null>(null);
+  const mountedAt = useRef(Date.now()); // only flash trades that arrive after we load
 
   const marketId = market.id;
   const showFlash = (msg: string) => {
@@ -62,7 +67,8 @@ export function TradingRoom({
           setTrades(s.recentTrades);
           setMyCash(s.myCashCents);
           setMyPos(posFromArray(s.myPositions));
-          setMyOrders(s.myOrders);
+          setOpenOrders(s.openOrders);
+          setHoldings(s.holdings);
           setSettlement(s.settlement);
           break;
         }
@@ -81,16 +87,23 @@ export function TradingRoom({
           setMyCash(msg.cashCents);
           setMyPos(posFromArray(msg.positions));
           break;
-        case 'order_update':
-          if (msg.order.userId === myUserId) {
-            setMyOrders((orders) => {
-              const rest = orders.filter((o) => o.id !== msg.order.id);
-              return msg.order.status === 'open' ? [...rest, msg.order] : rest;
-            });
-          }
+        case 'holding_update':
+          setHoldings((hs) => {
+            const rest = hs.filter((h) => h.userId !== msg.holding.userId);
+            return [...rest, msg.holding];
+          });
           break;
+        case 'order_update': {
+          const o = msg.order;
+          setOpenOrders((all) => {
+            const rest = all.filter((x) => x.id !== o.id);
+            return o.status === 'open' ? [...rest, o] : rest;
+          });
+          break;
+        }
         case 'market_update':
           setMarket(msg.market);
+          if (msg.market.status !== 'open') setOpenOrders([]); // book cleared on freeze
           break;
         case 'error':
           showFlash(msg.message);
@@ -120,7 +133,13 @@ export function TradingRoom({
   const [selected, setSelected] = useState(market.options[0]?.id ?? '');
   const selectedTrades = useMemo(() => trades.filter((t) => t.optionId === selected), [trades, selected]);
 
-  const place = (optionId: string, side: 'buy' | 'sell', priceCents: number, quantity: number) => {
+  const place = (
+    optionId: string,
+    side: 'buy' | 'sell',
+    priceCents: number,
+    quantity: number,
+    orderType: 'limit' | 'market' = 'limit',
+  ) => {
     wsClient.send({
       type: 'place_order',
       marketId,
@@ -128,10 +147,14 @@ export function TradingRoom({
       side,
       priceCents,
       quantity,
+      orderType,
       clientRef: Math.random().toString(36).slice(2),
     });
   };
   const cancel = (orderId: string) => wsClient.send({ type: 'cancel_order', marketId, orderId });
+  // One-click "take": fill a resting order by crossing it with the opposite side.
+  const take = (o: Order) =>
+    place(o.optionId, o.side === 'sell' ? 'buy' : 'sell', o.priceCents, o.remaining, 'limit');
 
   const openMarket = async () => {
     try {
@@ -180,7 +203,8 @@ export function TradingRoom({
     );
   }
 
-  const sortedTrades = [...trades].reverse();
+  // Render only the most recent trades (newest first) to keep scrolling smooth.
+  const sortedTrades = trades.slice(-60).reverse();
 
   return (
     <div className="flex flex-col gap-5">
@@ -213,7 +237,10 @@ export function TradingRoom({
             <div className={`text-xl font-semibold ${myCash < 0 ? 'text-red-400' : 'text-emerald-400'}`}>
               {dollars(myCash)}
             </div>
-            <div className="text-xs text-white/40">{myCash < 0 ? 'you owe the ledger' : 'available'}</div>
+            <div className="text-xs text-white/40">
+              {myCash < 0 ? 'you owe the ledger' : 'available'} · can owe up to{' '}
+              {dollars(maxDebtCents(market.buyInCents, market.maxOwePct))}
+            </div>
           </div>
           <div className="flex gap-4 flex-wrap">
             {market.options.map((o) => (
@@ -284,74 +311,205 @@ export function TradingRoom({
             series={seriesByOption[o.id] ?? []}
             parCents={market.parValueCents}
             canTrade={market.status === 'open'}
-            onPlace={(side, price, qty) => place(o.id, side, price, qty)}
+            onPlace={(side, price, qty, orderType) => place(o.id, side, price, qty, orderType)}
           />
         ))}
       </div>
 
-      {/* Your open orders */}
-      {myOrders.length > 0 && (
-        <section>
-          <h2 className="font-medium mb-2">Your open orders</h2>
-          <div className="flex flex-col gap-1.5">
-            {myOrders.map((ord) => (
-              <div
-                key={ord.id}
-                className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm"
-              >
-                <span>
-                  <span className={ord.side === 'buy' ? 'text-emerald-400' : 'text-red-400'}>
-                    {ord.side.toUpperCase()}
-                  </span>{' '}
-                  {ord.remaining} {labelOf(ord.optionId)} @ {dollars(ord.priceCents)}
-                </span>
-                <button onClick={() => cancel(ord.id)} className="text-white/50 hover:text-white">
-                  Cancel
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
+      {/* Tabbed panel: trade log / everyone's open orders / everyone's holdings */}
+      <section className="card p-4">
+        <div className="mb-3 flex gap-1 border-b border-white/10">
+          {(
+            [
+              ['trades', 'Trade log'],
+              ['orders', 'Open orders'],
+              ['holdings', 'Holdings'],
+            ] as const
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setBottomTab(key)}
+              className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium transition ${
+                bottomTab === key
+                  ? 'border-orange-500 text-white'
+                  : 'border-transparent text-white/50 hover:text-white'
+              }`}
+            >
+              {label}
+              {key === 'orders' && openOrders.length > 0 ? ` (${openOrders.length})` : ''}
+            </button>
+          ))}
+        </div>
 
-      {/* Transparent trade log */}
-      <section>
-        <h2 className="font-medium mb-2">Trade log</h2>
-        {sortedTrades.length === 0 ? (
-          <p className="text-sm text-white/40">No trades yet.</p>
-        ) : (
-          <div className="overflow-x-auto rounded-xl border border-white/10">
-            <table className="w-full text-sm">
-              <thead className="bg-white/5 text-white/50">
-                <tr>
-                  <th className="text-left font-normal px-3 py-2">Time</th>
-                  <th className="text-left font-normal px-3 py-2">Option</th>
-                  <th className="text-left font-normal px-3 py-2">Buyer ← Seller</th>
-                  <th className="text-right font-normal px-3 py-2">Shares</th>
-                  <th className="text-right font-normal px-3 py-2">Price</th>
-                  <th className="text-right font-normal px-3 py-2">Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedTrades.map((t) => (
-                  <tr key={t.id} className="border-t border-white/5">
-                    <td className="px-3 py-1.5 text-white/50 tabular-nums">{fmtTime(t.timestampMs)}</td>
-                    <td className="px-3 py-1.5">{labelOf(t.optionId)}</td>
-                    <td className="px-3 py-1.5">
-                      <span className="text-emerald-300">@{nameOf(t.buyerId)}</span>
-                      <span className="text-white/30"> ← </span>
-                      <span className="text-red-300">@{nameOf(t.sellerId)}</span>
-                    </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{t.shares}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{dollars(t.priceCents)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{dollars(t.totalCents)}</td>
+        {bottomTab === 'trades' &&
+          (sortedTrades.length === 0 ? (
+            <p className="text-sm text-white/40">No trades yet.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-white/50">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-normal">Time</th>
+                    <th className="px-3 py-2 text-left font-normal">Outcome</th>
+                    <th className="px-3 py-2 text-left font-normal">Buyer ← Seller</th>
+                    <th className="px-3 py-2 text-right font-normal">Shares</th>
+                    <th className="px-3 py-2 text-right font-normal">Price</th>
+                    <th className="px-3 py-2 text-right font-normal">Total</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {sortedTrades.map((t) => (
+                    <tr
+                      key={t.id}
+                      className={`border-t border-white/5 ${t.timestampMs >= mountedAt.current ? 'row-flash' : ''}`}
+                    >
+                      <td className="px-3 py-1.5 tabular-nums text-white/50">{fmtTime(t.timestampMs)}</td>
+                      <td className="px-3 py-1.5">{labelOf(t.optionId)}</td>
+                      <td className="px-3 py-1.5">
+                        <span className="text-emerald-300">@{nameOf(t.buyerId)}</span>
+                        <span className="text-white/30"> ← </span>
+                        <span className="text-red-300">@{nameOf(t.sellerId)}</span>
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{t.shares}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{dollars(t.priceCents)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{dollars(t.totalCents)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+
+        {bottomTab === 'orders' && (
+          <OpenOrdersTab
+            orders={openOrders}
+            tradingOpen={market.status === 'open'}
+            myUserId={myUserId}
+            nameOf={nameOf}
+            labelOf={labelOf}
+            onCancel={cancel}
+            onTake={take}
+          />
+        )}
+
+        {bottomTab === 'holdings' && (
+          <HoldingsTab holdings={holdings} options={market.options} myUserId={myUserId} nameOf={nameOf} />
         )}
       </section>
+    </div>
+  );
+}
+
+function OpenOrdersTab({
+  orders,
+  tradingOpen,
+  myUserId,
+  nameOf,
+  labelOf,
+  onCancel,
+  onTake,
+}: {
+  orders: Order[];
+  tradingOpen: boolean;
+  myUserId: string | null;
+  nameOf: (id: string) => string;
+  labelOf: (id: string) => string;
+  onCancel: (orderId: string) => void;
+  onTake: (order: Order) => void;
+}) {
+  if (!tradingOpen) return <p className="text-sm text-white/40">Trading is closed — no resting orders.</p>;
+  if (orders.length === 0) return <p className="text-sm text-white/40">No resting orders right now.</p>;
+  const sorted = [...orders].sort((a, b) => a.createdAt - b.createdAt);
+  return (
+    <div className="flex flex-col gap-1.5">
+      {sorted.map((o) => (
+        <div
+          key={o.id}
+          className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-sm"
+        >
+          <span>
+            <span className={o.side === 'buy' ? 'text-emerald-400' : 'text-red-400'}>
+              {o.side.toUpperCase()}
+            </span>{' '}
+            <span className="text-white/80">{o.remaining}</span> {labelOf(o.optionId)} @{' '}
+            {dollars(o.priceCents)}
+            <span className="ml-2 text-white/40">
+              @{nameOf(o.userId)}
+              {o.userId === myUserId && <span className="text-orange-400"> (you)</span>}
+            </span>
+          </span>
+          {o.userId === myUserId ? (
+            <button onClick={() => onCancel(o.id)} className="text-white/50 transition hover:text-white">
+              Cancel
+            </button>
+          ) : (
+            <button
+              onClick={() => onTake(o)}
+              className="rounded-md bg-orange-500 px-3 py-1 text-xs font-medium text-black transition hover:bg-orange-400"
+            >
+              {o.side === 'sell' ? 'Buy' : 'Sell'} {o.remaining} @ {dollars(o.priceCents)}
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function HoldingsTab({
+  holdings,
+  options,
+  myUserId,
+  nameOf,
+}: {
+  holdings: Holding[];
+  options: { id: string; label: string }[];
+  myUserId: string | null;
+  nameOf: (id: string) => string;
+}) {
+  if (holdings.length === 0) return <p className="text-sm text-white/40">No holdings yet.</p>;
+  const sorted = [...holdings].sort((a, b) => (a.username ?? '').localeCompare(b.username ?? ''));
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className="text-white/50">
+          <tr>
+            <th className="px-3 py-2 text-left font-normal">Member</th>
+            {options.map((o) => (
+              <th key={o.id} className="px-3 py-2 text-right font-normal">
+                {o.label}
+              </th>
+            ))}
+            <th className="px-3 py-2 text-right font-normal">Cash</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((h) => {
+            const byOption = Object.fromEntries(h.positions.map((p) => [p.optionId, p.shares]));
+            return (
+              <tr
+                key={h.userId}
+                className={`border-t border-white/5 ${h.userId === myUserId ? 'bg-white/5' : ''}`}
+              >
+                <td className="px-3 py-1.5">
+                  @{h.username ?? nameOf(h.userId)}
+                  {h.userId === myUserId && <span className="text-orange-400"> (you)</span>}
+                </td>
+                {options.map((o) => (
+                  <td key={o.id} className="px-3 py-1.5 text-right tabular-nums">
+                    {byOption[o.id] ?? 0}
+                  </td>
+                ))}
+                <td
+                  className={`px-3 py-1.5 text-right tabular-nums ${h.cashCents < 0 ? 'text-red-400' : 'text-emerald-400'}`}
+                >
+                  {dollars(h.cashCents)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -555,9 +713,10 @@ function OptionCard({
   series: number[];
   parCents: number;
   canTrade: boolean;
-  onPlace: (side: 'buy' | 'sell', priceCents: number, quantity: number) => void;
+  onPlace: (side: 'buy' | 'sell', priceCents: number, quantity: number, orderType: 'limit' | 'market') => void;
 }) {
   const [side, setSide] = useState<'buy' | 'sell'>('buy');
+  const [mode, setMode] = useState<'limit' | 'market'>('limit');
   const [priceStr, setPriceStr] = useState('');
   const [qtyStr, setQtyStr] = useState('');
 
@@ -569,10 +728,16 @@ function OptionCard({
   const bestAsk = book?.asks[0]?.priceCents ?? null;
 
   const submit = () => {
-    const priceCents = Math.round(parseFloat(priceStr) * 100);
     const quantity = parseInt(qtyStr, 10);
-    if (!Number.isFinite(priceCents) || priceCents <= 0 || !Number.isInteger(quantity) || quantity <= 0) return;
-    onPlace(side, priceCents, quantity);
+    if (!Number.isInteger(quantity) || quantity <= 0) return;
+    if (mode === 'market') {
+      onPlace(side, 0, quantity, 'market');
+      setQtyStr('');
+      return;
+    }
+    const priceCents = Math.round(parseFloat(priceStr) * 100);
+    if (!Number.isFinite(priceCents) || priceCents <= 0) return;
+    onPlace(side, priceCents, quantity, 'limit');
     setQtyStr('');
   };
 
@@ -630,44 +795,65 @@ function OptionCard({
               Sell
             </button>
           </div>
+          <div className="flex items-center gap-1 text-xs">
+            <button
+              onClick={() => setMode('limit')}
+              className={`rounded px-2 py-0.5 ${mode === 'limit' ? 'bg-orange-500/20 text-orange-300' : 'text-white/40 hover:text-white'}`}
+            >
+              Limit
+            </button>
+            <button
+              onClick={() => setMode('market')}
+              className={`rounded px-2 py-0.5 ${mode === 'market' ? 'bg-orange-500/20 text-orange-300' : 'text-white/40 hover:text-white'}`}
+            >
+              Market
+            </button>
+            <span className="ml-auto text-white/30">
+              {mode === 'market' ? 'fills at best price' : 'set your price'}
+            </span>
+          </div>
           <div className="flex gap-2">
-            <input
-              inputMode="decimal"
-              placeholder={`$ (max ${dollars(parCents)})`}
-              value={priceStr}
-              onChange={(e) => setPriceStr(e.target.value)}
-              className="w-1/2 rounded-md border border-white/10 bg-black/40 px-2.5 py-1.5 text-sm outline-none transition focus:border-orange-500/70"
-            />
+            {mode === 'limit' && (
+              <input
+                inputMode="decimal"
+                placeholder={`$ (max ${dollars(parCents)})`}
+                value={priceStr}
+                onChange={(e) => setPriceStr(e.target.value)}
+                className="w-1/2 rounded-md border border-white/10 bg-black/40 px-2.5 py-1.5 text-sm outline-none transition focus:border-orange-500/70"
+              />
+            )}
             <input
               inputMode="numeric"
               placeholder="shares"
               value={qtyStr}
               onChange={(e) => setQtyStr(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && submit()}
-              className="w-1/2 rounded-md border border-white/10 bg-black/40 px-2.5 py-1.5 text-sm outline-none transition focus:border-orange-500/70"
+              className={`${mode === 'limit' ? 'w-1/2' : 'w-full'} rounded-md border border-white/10 bg-black/40 px-2.5 py-1.5 text-sm outline-none transition focus:border-orange-500/70`}
             />
           </div>
-          <div className="flex items-center justify-between text-xs text-white/40">
-            <button
-              type="button"
-              onClick={() => bestAsk != null && setPriceStr((bestAsk / 100).toFixed(2))}
-              className="hover:text-white"
-            >
-              best ask {bestAsk != null ? dollars(bestAsk) : '—'}
-            </button>
-            <button
-              type="button"
-              onClick={() => bestBid != null && setPriceStr((bestBid / 100).toFixed(2))}
-              className="hover:text-white"
-            >
-              best bid {bestBid != null ? dollars(bestBid) : '—'}
-            </button>
-          </div>
+          {mode === 'limit' && (
+            <div className="flex items-center justify-between text-xs text-white/40">
+              <button
+                type="button"
+                onClick={() => bestAsk != null && setPriceStr((bestAsk / 100).toFixed(2))}
+                className="hover:text-white"
+              >
+                best ask {bestAsk != null ? dollars(bestAsk) : '—'}
+              </button>
+              <button
+                type="button"
+                onClick={() => bestBid != null && setPriceStr((bestBid / 100).toFixed(2))}
+                className="hover:text-white"
+              >
+                best bid {bestBid != null ? dollars(bestBid) : '—'}
+              </button>
+            </div>
+          )}
           <button
             onClick={submit}
             className={`rounded-md py-1.5 text-sm font-medium ${side === 'buy' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'}`}
           >
-            Place {side} order
+            {mode === 'market' ? `${side === 'buy' ? 'Buy' : 'Sell'} at best price` : `Place ${side} order`}
           </button>
         </div>
       )}

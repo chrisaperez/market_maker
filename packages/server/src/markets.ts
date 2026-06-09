@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid';
 import {
   computeFairness,
+  DEFAULT_MAX_OWE_PCT,
   MAX_OPTIONS,
   MIN_OPTIONS,
   validateEconomics,
@@ -16,6 +17,7 @@ export interface CreateMarketInput {
   buyInCents: number;
   sharesPerOption: number;
   windowSeconds: number;
+  maxOwePct?: number;
   options: string[];
 }
 
@@ -28,6 +30,7 @@ interface MarketRow {
   shares_per_option: number;
   par_value_cents: number;
   window_seconds: number;
+  max_owe_pct: number;
   status: string;
   opened_at: number | null;
   closes_at: number | null;
@@ -44,8 +47,8 @@ interface OptionRow {
 
 const insertMarket = db.prepare(`
   INSERT INTO markets(id, creator_id, title, description, buy_in_cents, shares_per_option,
-    par_value_cents, window_seconds, status, created_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'lobby', ?)
+    par_value_cents, window_seconds, max_owe_pct, status, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'lobby', ?)
 `);
 const insertOption = db.prepare(
   'INSERT INTO market_options(id, market_id, label, sort_order) VALUES (?, ?, ?, ?)',
@@ -92,6 +95,7 @@ function rowToMarket(r: MarketRow): Market {
     sharesPerOption: r.shares_per_option,
     parValueCents: r.par_value_cents,
     windowSeconds: r.window_seconds,
+    maxOwePct: r.max_owe_pct,
     status: r.status as MarketStatus,
     openedAt: r.opened_at,
     closesAt: r.closes_at,
@@ -130,6 +134,10 @@ export function createMarket(creatorId: string, input: CreateMarketInput): Marke
   if (!Number.isInteger(input.windowSeconds) || input.windowSeconds < 10) {
     throw new MarketError('Trading window must be at least 10 seconds.');
   }
+  const maxOwePct = input.maxOwePct ?? DEFAULT_MAX_OWE_PCT;
+  if (!Number.isInteger(maxOwePct) || maxOwePct < 0 || maxOwePct > 1000) {
+    throw new MarketError('Debt limit must be a whole percentage between 0 and 1000.');
+  }
 
   const { parValueCents } = computeFairness({
     buyInCents: input.buyInCents,
@@ -148,6 +156,7 @@ export function createMarket(creatorId: string, input: CreateMarketInput): Marke
       input.sharesPerOption,
       Math.round(parValueCents),
       input.windowSeconds,
+      maxOwePct,
       now,
     );
     labels.forEach((label, i) => insertOption.run(nanoid(), id, label, i));

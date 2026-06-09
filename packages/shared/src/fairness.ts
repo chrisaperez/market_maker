@@ -19,6 +19,13 @@ export const DEFAULT_ECONOMICS: Economics = {
   sharesPerOption: 10, // -> par $1.00/share
 };
 
+export const DEFAULT_MAX_OWE_PCT = 40;
+
+/** The most a member may owe the ledger (in cents), from the buy-in and % cap. */
+export function maxDebtCents(buyInCents: number, maxOwePct: number): number {
+  return Math.round((buyInCents * maxOwePct) / 100);
+}
+
 export const MIN_OPTIONS = 2;
 export const MAX_OPTIONS = 50;
 export const MAX_SHARES_PER_OPTION = 100_000;

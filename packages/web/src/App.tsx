@@ -11,7 +11,7 @@ import Market from './pages/Market';
 function Header() {
   const username = useApp((s) => s.username);
   return (
-    <header className="sticky top-0 z-20 border-b border-white/10 bg-black/60 backdrop-blur">
+    <header className="sticky top-0 z-20 border-b border-white/10 bg-[#0c0c0e]">
       <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
         <Link to="/" className="flex items-center gap-2.5">
           <span className="flex h-7 w-7 items-center justify-center rounded-md bg-orange-500 text-black">

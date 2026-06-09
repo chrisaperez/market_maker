@@ -44,6 +44,7 @@ const createSchema = z.object({
   buyInCents: z.number().int().positive(),
   sharesPerOption: z.number().int().positive(),
   windowSeconds: z.number().int().min(10),
+  maxOwePct: z.number().int().min(0).max(1000).optional(),
   options: z.array(z.string().min(1).max(80)).min(2).max(50),
 });
 

@@ -53,3 +53,16 @@
       hover:border-white/30 hover:text-white disabled:opacity-40;
   }
 }
+
+@keyframes rowflash {
+  from {
+    background-color: rgba(249, 115, 22, 0.18);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.row-flash {
+  animation: rowflash 1s ease-out;
+}

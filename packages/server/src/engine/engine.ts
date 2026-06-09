@@ -1,5 +1,6 @@
 import { nanoid } from 'nanoid';
-import { dollars, type Market, type OptionBook, type Order, type Trade } from '@mm/shared';
+import { dollars, maxDebtCents, type Holding, type Market, type Order, type Trade } from '@mm/shared';
+import { getUser } from '../auth.js';
 import { db, nextOrderSeq, transaction } from '../db.js';
 import { getMarket, openMarketRow } from '../markets.js';
 import { isActiveMember, listMembers } from '../membership.js';
@@ -49,8 +50,16 @@ const lockedSells = db.prepare(`
   SELECT COALESCE(SUM(remaining), 0) AS s FROM orders
   WHERE market_id = ? AND option_id = ? AND user_id = ? AND side = 'sell' AND status = 'open'
 `);
+// Worst-case cash committed by a user's resting buy orders (for the debt cap).
+const committedBuys = db.prepare(`
+  SELECT COALESCE(SUM(remaining * price_cents), 0) AS c FROM orders
+  WHERE market_id = ? AND user_id = ? AND side = 'buy' AND status = 'open'
+`);
 const selectMyOpenOrders = db.prepare(`
   SELECT * FROM orders WHERE market_id = ? AND user_id = ? AND status = 'open' ORDER BY created_at
+`);
+const selectAllOpenOrders = db.prepare(`
+  SELECT * FROM orders WHERE market_id = ? AND status = 'open' ORDER BY created_at
 `);
 const selectMarketTrades = db.prepare(`
   SELECT * FROM (
@@ -107,6 +116,23 @@ export function getMarketTrades(marketId: string): Trade[] {
   return (selectMarketTrades.all(marketId) as unknown as TradeRow[]).map(rowToTrade);
 }
 
+/** Every member's resting orders (the whole book is transparent). */
+export function getAllOpenOrders(marketId: string): Order[] {
+  return (selectAllOpenOrders.all(marketId) as unknown as OrderRow[]).map(rowToOrder);
+}
+
+/** Every active member's shares + cash (fully transparent ledger). */
+export function getHoldings(marketId: string): Holding[] {
+  return listMembers(marketId)
+    .filter((m) => m.status === 'active')
+    .map((m) => ({
+      userId: m.userId,
+      username: m.username,
+      cashCents: getCash(marketId, m.userId),
+      positions: getPositions(marketId, m.userId),
+    }));
+}
+
 /** Push a user's current cash + positions to all their connected tabs. */
 export function sendBalance(marketId: string, userId: string): void {
   hub.sendToUser(userId, {
@@ -117,8 +143,23 @@ export function sendBalance(marketId: string, userId: string): void {
   });
 }
 
-function sendOrderUpdate(userId: string, order: Order): void {
-  hub.sendToUser(userId, { type: 'order_update', marketId: order.marketId, order });
+/** Broadcast a member's updated holdings to everyone watching the market. */
+export function broadcastHolding(marketId: string, userId: string): void {
+  hub.broadcast(marketId, {
+    type: 'holding_update',
+    marketId,
+    holding: {
+      userId,
+      username: getUser(userId)?.username ?? null,
+      cashCents: getCash(marketId, userId),
+      positions: getPositions(marketId, userId),
+    },
+  });
+}
+
+// Order changes are broadcast to the whole room so everyone's "open orders" view stays live.
+function sendOrderUpdate(order: Order): void {
+  hub.broadcast(order.marketId, { type: 'order_update', marketId: order.marketId, order });
 }
 
 interface MatchResult {
@@ -128,15 +169,25 @@ interface MatchResult {
 }
 
 /**
- * Places a limit order and matches it against the book with strict price-time
- * (FIFO) priority. Runs atomically; on success broadcasts trades, book depth,
- * and per-user balance/order updates to the market room.
+ * Places an order and matches it against the book with strict price-time (FIFO)
+ * priority. `limit` orders rest any unfilled remainder; `market` orders sweep the
+ * best prices and cancel the remainder. Enforces no-short-selling and the
+ * per-market debt cap (a member can't owe more than maxOwePct% of their buy-in).
+ * Runs atomically; on success broadcasts trades, book depth and per-user updates.
  */
 export function placeOrder(
   userId: string,
-  input: { marketId: string; optionId: string; side: 'buy' | 'sell'; priceCents: number; quantity: number },
+  input: {
+    marketId: string;
+    optionId: string;
+    side: 'buy' | 'sell';
+    priceCents: number;
+    quantity: number;
+    orderType?: 'limit' | 'market';
+  },
 ): void {
-  const { marketId, optionId, side, priceCents, quantity } = input;
+  const { marketId, optionId, side, quantity } = input;
+  const isMarket = input.orderType === 'market';
   const market = getMarket(marketId);
   if (!market) throw new OrderError('Market not found.');
   if (market.status !== 'open') throw new OrderError('Trading is not open right now.');
@@ -145,11 +196,23 @@ export function placeOrder(
   }
   if (!isActiveMember(marketId, userId)) throw new OrderError('You are not a member of this market.');
   if (!market.options.some((o) => o.id === optionId)) throw new OrderError('Unknown option.');
-  if (!Number.isInteger(quantity) || quantity <= 0) throw new OrderError('Quantity must be a positive whole number.');
-  if (!Number.isInteger(priceCents) || priceCents <= 0) throw new OrderError('Price must be positive.');
-  if (priceCents > market.parValueCents) {
-    throw new OrderError(`Price can't exceed the par value of ${dollars(market.parValueCents)}/share.`);
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new OrderError('Quantity must be a positive whole number.');
   }
+
+  // For market orders we cross to the extreme (buy up to par, sell down to 1¢) so
+  // the order sweeps the best available resting prices.
+  const limitPrice = isMarket ? (side === 'buy' ? market.parValueCents : 1) : input.priceCents;
+  if (!isMarket) {
+    if (!Number.isInteger(input.priceCents) || input.priceCents <= 0) {
+      throw new OrderError('Price must be positive.');
+    }
+    if (input.priceCents > market.parValueCents) {
+      throw new OrderError(`Price can't exceed the par value of ${dollars(market.parValueCents)}/share.`);
+    }
+  }
+
+  const maxDebt = maxDebtCents(market.buyInCents, market.maxOwePct);
 
   const result = transaction<MatchResult>(() => {
     fundMember(marketId, userId);
@@ -162,25 +225,41 @@ export function placeOrder(
       }
     }
 
+    // Debt budget: most additional cash this order may commit and stay within the cap.
+    let remainingBudget = Infinity;
+    if (side === 'buy') {
+      const committed = (committedBuys.get(marketId, userId) as { c: number }).c;
+      remainingBudget = getCash(marketId, userId) + maxDebt - committed;
+      if (!isMarket && quantity * limitPrice > remainingBudget) {
+        throw new OrderError(
+          `That order could make you owe more than your limit of ${dollars(maxDebt)}. Lower the price or shares.`,
+        );
+      }
+    }
+
     const seq = nextOrderSeq();
     const orderId = nanoid();
     const createdAt = Date.now();
-    insertOrder.run(orderId, marketId, optionId, userId, side, priceCents, quantity, quantity, createdAt, seq);
+    insertOrder.run(orderId, marketId, optionId, userId, side, limitPrice, quantity, quantity, createdAt, seq);
 
     let remaining = quantity;
     const trades: Trade[] = [];
     const touched: Order[] = [];
     const candidates = (
       side === 'buy'
-        ? selectAsks.all(marketId, optionId, priceCents)
-        : selectBids.all(marketId, optionId, priceCents)
+        ? selectAsks.all(marketId, optionId, limitPrice)
+        : selectBids.all(marketId, optionId, limitPrice)
     ) as unknown as OrderRow[];
 
     for (const c of candidates) {
       if (remaining <= 0) break;
       if (c.user_id === userId) continue; // never self-trade
-      const fill = Math.min(remaining, c.remaining);
       const tradePrice = c.price_cents; // maker's resting price wins
+      let fill = Math.min(remaining, c.remaining);
+      if (side === 'buy') {
+        fill = Math.min(fill, Math.floor(remainingBudget / tradePrice));
+        if (fill <= 0) break; // hitting the debt cap — can't afford more
+      }
       const total = fill * tradePrice;
       const buyerId = side === 'buy' ? userId : c.user_id;
       const sellerId = side === 'buy' ? c.user_id : userId;
@@ -193,6 +272,7 @@ export function placeOrder(
       const candRemaining = c.remaining - fill;
       updateOrder.run(candRemaining, candRemaining === 0 ? 'filled' : 'open', c.id);
       remaining -= fill;
+      if (side === 'buy') remainingBudget -= total;
 
       trades.push({
         id: tradeId,
@@ -208,7 +288,13 @@ export function placeOrder(
       touched.push(rowToOrder(selectOrder.get(c.id) as unknown as OrderRow));
     }
 
-    updateOrder.run(remaining, remaining === 0 ? 'filled' : 'open', orderId);
+    if (isMarket && remaining > 0) {
+      // Market orders never rest — cancel whatever couldn't be filled now.
+      if (trades.length === 0) throw new OrderError('No liquidity available to fill that right now.');
+      updateOrder.run(remaining, 'cancelled', orderId);
+    } else {
+      updateOrder.run(remaining, remaining === 0 ? 'filled' : 'open', orderId);
+    }
     const placedOrder = rowToOrder(selectOrder.get(orderId) as unknown as OrderRow);
     return { trades, placedOrder, touchedOrders: touched };
   });
@@ -233,10 +319,13 @@ function broadcastAfterTrade(market: Market, optionId: string, result: MatchResu
     affected.add(t.buyerId);
     affected.add(t.sellerId);
   }
-  for (const uid of affected) sendBalance(market.id, uid);
+  for (const uid of affected) {
+    sendBalance(market.id, uid); // own header
+    broadcastHolding(market.id, uid); // public holdings table
+  }
 
-  sendOrderUpdate(result.placedOrder.userId, result.placedOrder);
-  for (const o of result.touchedOrders) sendOrderUpdate(o.userId, o);
+  sendOrderUpdate(result.placedOrder);
+  for (const o of result.touchedOrders) sendOrderUpdate(o);
 }
 
 export function cancelOrder(userId: string, input: { marketId: string; orderId: string }): void {
@@ -251,7 +340,7 @@ export function cancelOrder(userId: string, input: { marketId: string; orderId: 
 
   const book = buildOptionBook(input.marketId, order.optionId);
   hub.broadcast(input.marketId, { type: 'book', marketId: input.marketId, book });
-  sendOrderUpdate(userId, order);
+  sendOrderUpdate(order);
 }
 
 /**
@@ -281,6 +370,7 @@ export function openMarket(marketId: string, actorId: string): Market {
   for (const m of members) {
     hub.sendToUser(m.userId, { type: 'market_update', marketId, market: updated });
     sendBalance(marketId, m.userId);
+    broadcastHolding(marketId, m.userId); // populate the holdings table for everyone
   }
   return updated;
 }

@@ -110,6 +110,15 @@ db.exec(`
   INSERT OR IGNORE INTO counters(name, value) VALUES ('order_seq', 0);
 `);
 
+// --- lightweight migrations so existing databases gain new columns ---
+function addColumnIfMissing(table: string, column: string, definition: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[];
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+addColumnIfMissing('markets', 'max_owe_pct', 'INTEGER NOT NULL DEFAULT 40');
+
 const nextSeqStmt = db.prepare(
   `UPDATE counters SET value = value + 1 WHERE name = 'order_seq' RETURNING value`,
 );

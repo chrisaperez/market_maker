@@ -1,5 +1,11 @@
 import type { MarketSnapshot, PricePoint } from '@mm/shared';
-import { buildOptionBook, getMarketTrades, getMyOpenOrders } from './engine/index.js';
+import {
+  buildOptionBook,
+  getAllOpenOrders,
+  getHoldings,
+  getMarketTrades,
+  getMyOpenOrders,
+} from './engine/index.js';
 import { getCash, getPositions } from './engine/ledger.js';
 import { getMarket } from './markets.js';
 import { listMembers, listPendingRequests } from './membership.js';
@@ -28,6 +34,8 @@ export function buildSnapshot(marketId: string, userId: string): MarketSnapshot 
     myOrders: getMyOpenOrders(marketId, userId),
     myCashCents: getCash(marketId, userId),
     myPositions: getPositions(marketId, userId),
+    openOrders: getAllOpenOrders(marketId),
+    holdings: getHoldings(marketId),
     pendingRequests: isCreator ? listPendingRequests(marketId) : [],
     settlement: getSettlementInfo(marketId),
   };
