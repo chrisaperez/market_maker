@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(pnpm --version)",
+      "Bash(bun --version)",
+      "Bash(docker --version)",
+      "Bash(gh --version)",
+      "Bash(npm install *)",
+      "Bash(npm run *)"
+    ]
+  }
+}

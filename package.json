@@ -1,0 +1,19 @@
+{
+  "name": "market-maker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"npm run dev -w @mm/server\" \"npm run dev -w @mm/web\"",
+    "build": "npm run build -w @mm/web",
+    "test": "npm run test -w @mm/server",
+    "typecheck": "tsc -b --pretty"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2"
+  }
+}

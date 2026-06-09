@@ -1,0 +1,28 @@
+# Fly.io configuration for Market Maker.
+# `app` is filled in by `fly launch`; set your own region below.
+app = "market-maker-chris"
+primary_region = "sjc"
+
+[build]
+
+[env]
+  NODE_ENV = "production"
+  MM_SERVER_PORT = "4000"
+  MM_DB_PATH = "/data/market_maker.db"
+
+# Persistent volume so the SQLite database survives deploys/restarts.
+[mounts]
+  source = "data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  # Keep one machine always running so live WebSocket connections aren't dropped.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
