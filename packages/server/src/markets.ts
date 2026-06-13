@@ -31,6 +31,7 @@ interface MarketRow {
   par_value_cents: number;
   window_seconds: number;
   max_owe_pct: number;
+  bot_enabled: number;
   status: string;
   opened_at: number | null;
   closes_at: number | null;
@@ -48,8 +49,15 @@ interface OptionRow {
 const insertMarket = db.prepare(`
   INSERT INTO markets(id, creator_id, title, description, buy_in_cents, shares_per_option,
     par_value_cents, window_seconds, max_owe_pct, status, created_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'lobby', ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)
 `);
+const updateMarketRow = db.prepare(`
+  UPDATE markets SET title = ?, description = ?, buy_in_cents = ?, shares_per_option = ?,
+    par_value_cents = ?, window_seconds = ?, max_owe_pct = ? WHERE id = ?
+`);
+const deleteOptionsStmt = db.prepare('DELETE FROM market_options WHERE market_id = ?');
+const deleteMembershipsStmt = db.prepare('DELETE FROM memberships WHERE market_id = ?');
+const deleteMarketStmt = db.prepare('DELETE FROM markets WHERE id = ?');
 const insertOption = db.prepare(
   'INSERT INTO market_options(id, market_id, label, sort_order) VALUES (?, ?, ?, ?)',
 );
@@ -96,6 +104,7 @@ function rowToMarket(r: MarketRow): Market {
     parValueCents: r.par_value_cents,
     windowSeconds: r.window_seconds,
     maxOwePct: r.max_owe_pct,
+    botEnabled: r.bot_enabled === 1,
     status: r.status as MarketStatus,
     openedAt: r.opened_at,
     closesAt: r.closes_at,
@@ -114,7 +123,15 @@ export function listMarketsForUser(userId: string): Market[] {
   return (selectMarketsForUser.all(userId) as unknown as MarketRow[]).map(rowToMarket);
 }
 
-export function createMarket(creatorId: string, input: CreateMarketInput): Market {
+interface CleanMarketInput {
+  title: string;
+  description: string;
+  labels: string[];
+  parValueCents: number;
+  maxOwePct: number;
+}
+
+function validateMarketInput(input: CreateMarketInput): CleanMarketInput {
   const econ = validateEconomics({
     buyInCents: input.buyInCents,
     sharesPerOption: input.sharesPerOption,
@@ -138,36 +155,75 @@ export function createMarket(creatorId: string, input: CreateMarketInput): Marke
   if (!Number.isInteger(maxOwePct) || maxOwePct < 0 || maxOwePct > 1000) {
     throw new MarketError('Debt limit must be a whole percentage between 0 and 1000.');
   }
-
   const { parValueCents } = computeFairness({
     buyInCents: input.buyInCents,
     sharesPerOption: input.sharesPerOption,
   });
+  return { title, description: input.description?.trim() ?? '', labels, parValueCents: Math.round(parValueCents), maxOwePct };
+}
+
+/** Creates a market in `draft` status — the creator edits it, then publishes. */
+export function createMarket(creatorId: string, input: CreateMarketInput): Market {
+  const v = validateMarketInput(input);
   const id = nanoid();
   const now = Date.now();
-
   transaction(() => {
     insertMarket.run(
-      id,
-      creatorId,
-      title,
-      input.description?.trim() ?? '',
-      input.buyInCents,
-      input.sharesPerOption,
-      Math.round(parValueCents),
-      input.windowSeconds,
-      maxOwePct,
-      now,
+      id, creatorId, v.title, v.description, input.buyInCents, input.sharesPerOption,
+      v.parValueCents, input.windowSeconds, v.maxOwePct, now,
     );
-    labels.forEach((label, i) => insertOption.run(nanoid(), id, label, i));
+    v.labels.forEach((label, i) => insertOption.run(nanoid(), id, label, i));
     insertMembership.run(id, creatorId, 'creator', 'active', now);
   });
-
   return getMarket(id)!;
+}
+
+function requireDraftCreator(marketId: string, actorId: string): Market {
+  const market = getMarket(marketId);
+  if (!market) throw new MarketError('Market not found.');
+  if (market.creatorId !== actorId) throw new MarketError('Only the creator can do that.');
+  if (market.status !== 'draft') throw new MarketError('Only draft markets can be edited.');
+  return market;
+}
+
+/** Edits a draft's details + outcomes (replaces the option list). */
+export function updateMarketDraft(marketId: string, actorId: string, input: CreateMarketInput): Market {
+  requireDraftCreator(marketId, actorId);
+  const v = validateMarketInput(input);
+  transaction(() => {
+    updateMarketRow.run(
+      v.title, v.description, input.buyInCents, input.sharesPerOption,
+      v.parValueCents, input.windowSeconds, v.maxOwePct, marketId,
+    );
+    deleteOptionsStmt.run(marketId);
+    v.labels.forEach((label, i) => insertOption.run(nanoid(), marketId, label, i));
+  });
+  return getMarket(marketId)!;
+}
+
+/** Publishes a draft → `lobby` (now shareable, accepting members). */
+export function publishMarket(marketId: string, actorId: string): Market {
+  requireDraftCreator(marketId, actorId);
+  setMarketStatus(marketId, 'lobby');
+  return getMarket(marketId)!;
+}
+
+export function deleteDraft(marketId: string, actorId: string): void {
+  requireDraftCreator(marketId, actorId);
+  transaction(() => {
+    deleteOptionsStmt.run(marketId);
+    deleteMembershipsStmt.run(marketId);
+    deleteMarketStmt.run(marketId);
+  });
 }
 
 export function setMarketStatus(id: string, status: MarketStatus): void {
   updateStatus.run(status, id);
+}
+
+const updateBotEnabled = db.prepare('UPDATE markets SET bot_enabled = ? WHERE id = ?');
+export function setBotEnabled(id: string, enabled: boolean): void {
+  updateBotEnabled.run(enabled ? 1 : 0, id);
 }
 
 export function openMarketRow(id: string, openedAt: number, closesAt: number): void {

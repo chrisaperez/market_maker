@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
-import { dollars, type JoinRequest, type Member } from '@mm/shared';
-import { api, type MarketDetail } from '../lib/api';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { dollars, type JoinRequest, type Market, type Member } from '@mm/shared';
+import { api, type CreateMarketBody, type MarketDetail } from '../lib/api';
 import { useApp } from '../lib/store';
 import { wsClient } from '../lib/ws';
+import { MarketForm } from '../components/MarketForm';
 import { TradingRoom } from '../components/TradingRoom';
 
 const STATUS_STYLE: Record<string, string> = {
@@ -82,6 +83,16 @@ export default function Market() {
 
   const { market, fairness, myStatus, role } = detail;
   const isCreator = role === 'creator';
+
+  if (market.status === 'draft') {
+    return isCreator ? (
+      <DraftEditor market={market} onChanged={load} />
+    ) : (
+      <div className="mx-auto max-w-md rounded-xl border border-white/10 bg-white/5 p-6 text-center text-white/60">
+        This market hasn't been published yet.
+      </div>
+    );
+  }
 
   const approve = async (userId: string) => {
     await api.approve(id, userId);
@@ -190,6 +201,80 @@ export default function Market() {
       {(myStatus === 'active' || isCreator) && (
         <TradingRoom market={market} members={detail.members ?? []} isCreator={isCreator} />
       )}
+    </div>
+  );
+}
+
+function DraftEditor({ market, onChanged }: { market: Market; onChanged: () => void }) {
+  const navigate = useNavigate();
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const save = async (body: CreateMarketBody) => {
+    setBusy(true);
+    setError('');
+    try {
+      await api.updateMarket(market.id, body);
+      onChanged();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const publish = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await api.publishMarket(market.id);
+      onChanged();
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  };
+  const remove = async () => {
+    if (!window.confirm('Delete this draft? This cannot be undone.')) return;
+    try {
+      await api.deleteMarket(market.id);
+      navigate('/');
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  return (
+    <div className="mx-auto flex max-w-2xl flex-col gap-5">
+      <div className="flex items-center gap-3">
+        <h1 className="text-2xl font-semibold tracking-tight">Edit draft</h1>
+        <span className="rounded-full bg-orange-500/15 px-2 py-0.5 text-xs text-orange-300">Draft</span>
+      </div>
+      <p className="-mt-2 text-sm text-white/50">
+        Only you can see this. Publish to get a shareable invite link and start letting friends in.
+      </p>
+      <MarketForm
+        initial={{
+          title: market.title,
+          description: market.description,
+          options: market.options.map((o) => o.label),
+          buyInDollars: market.buyInCents / 100,
+          sharesPerOption: market.sharesPerOption,
+          windowSeconds: market.windowSeconds,
+          maxOwePct: market.maxOwePct,
+        }}
+        submitLabel="Save changes"
+        busy={busy}
+        error={error}
+        onSubmit={save}
+      />
+      <div className="flex flex-wrap gap-2 border-t border-white/10 pt-4">
+        <button onClick={publish} disabled={busy} className="btn-primary">
+          Publish &amp; get invite link
+        </button>
+        <button onClick={remove} className="btn-ghost">
+          Delete draft
+        </button>
+      </div>
     </div>
   );
 }

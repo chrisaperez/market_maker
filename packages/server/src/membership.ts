@@ -98,6 +98,9 @@ export function requestJoin(
   if (!verifyInviteToken(inviteToken, marketId)) {
     throw new MembershipError('This invite link is invalid.');
   }
+  if (market.status === 'draft') {
+    throw new MembershipError("This market hasn't been published yet.");
+  }
   if (market.status === 'settled' || market.status === 'cancelled') {
     throw new MembershipError('This market is closed to new members.');
   }

@@ -14,6 +14,7 @@ import { getMarket } from './markets.js';
 import { isActiveMember } from './membership.js';
 import { hub } from './realtime.js';
 import { router } from './routes.js';
+import { startBotLoop } from './bot.js';
 import { armOpenMarketTimers } from './scheduler.js';
 import { buildSnapshot } from './snapshot.js';
 import { handleOrderMessage } from './engine/index.js';
@@ -129,4 +130,5 @@ setInterval(() => {
 server.listen(PORT, () => {
   console.log(`[server] http + ws listening on http://localhost:${PORT}`);
   armOpenMarketTimers(); // re-arm freeze timers for markets still in their window
+  startBotLoop(); // keep liquidity-bot quotes fresh in bot-enabled markets
 });

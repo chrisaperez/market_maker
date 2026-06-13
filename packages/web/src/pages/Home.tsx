@@ -6,6 +6,7 @@ import { useApp } from '../lib/store';
 import { UsernameSetter } from '../components/UsernameSetter';
 
 const STATUS_LABEL: Record<string, string> = {
+  draft: 'Draft',
   lobby: 'Lobby',
   open: 'Trading',
   frozen: 'Frozen',

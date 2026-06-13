@@ -43,6 +43,8 @@ export const api = {
     req<Session>('/api/auth/username', { method: 'POST', body: JSON.stringify({ username }) }),
   listMarkets: () => req<{ markets: Market[] }>('/api/markets'),
   openMarket: (id: string) => req<{ market: Market }>(`/api/markets/${id}/open`, { method: 'POST' }),
+  setBot: (id: string, enabled: boolean) =>
+    req<{ ok: boolean }>(`/api/markets/${id}/bot`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   declareWinner: (id: string, winningOptionId: string) =>
     req<{ market: Market }>(`/api/markets/${id}/declare`, {
       method: 'POST',
@@ -50,8 +52,17 @@ export const api = {
     }),
   voteSettlement: (id: string, agree: boolean) =>
     req<{ ok: boolean }>(`/api/markets/${id}/vote`, { method: 'POST', body: JSON.stringify({ agree }) }),
+  requestFreeze: (id: string) =>
+    req<{ ok: boolean }>(`/api/markets/${id}/freeze-request`, { method: 'POST' }),
+  voteFreeze: (id: string, agree: boolean) =>
+    req<{ ok: boolean }>(`/api/markets/${id}/freeze-vote`, { method: 'POST', body: JSON.stringify({ agree }) }),
   createMarket: (body: CreateMarketBody) =>
     req<{ market: Market }>('/api/markets', { method: 'POST', body: JSON.stringify(body) }),
+  updateMarket: (id: string, body: CreateMarketBody) =>
+    req<{ market: Market }>(`/api/markets/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  publishMarket: (id: string) =>
+    req<{ market: Market }>(`/api/markets/${id}/publish`, { method: 'POST' }),
+  deleteMarket: (id: string) => req<{ ok: boolean }>(`/api/markets/${id}`, { method: 'DELETE' }),
   getMarket: (id: string, invite?: string) =>
     req<MarketDetail>(`/api/markets/${id}${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`),
   join: (id: string, username: string, invite: string) =>

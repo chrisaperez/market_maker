@@ -1,5 +1,6 @@
 import {
   payoutCents,
+  type FreezeInfo,
   type Market,
   type SettlementInfo,
   type SettlementResult,
@@ -20,6 +21,13 @@ const upsertVote = db.prepare(`
   ON CONFLICT(market_id, user_id) DO UPDATE SET agree = excluded.agree, voted_at = excluded.voted_at
 `);
 const selectVotes = db.prepare('SELECT user_id, agree, voted_at FROM settlement_votes WHERE market_id = ?');
+
+const deleteFreezeVotes = db.prepare('DELETE FROM freeze_votes WHERE market_id = ?');
+const upsertFreezeVote = db.prepare(`
+  INSERT INTO freeze_votes(market_id, user_id, agree, voted_at) VALUES (?, ?, ?, ?)
+  ON CONFLICT(market_id, user_id) DO UPDATE SET agree = excluded.agree, voted_at = excluded.voted_at
+`);
+const selectFreezeVotes = db.prepare('SELECT user_id, agree, voted_at FROM freeze_votes WHERE market_id = ?');
 
 function activeMembers(marketId: string) {
   return listMembers(marketId).filter((m) => m.status === 'active');
@@ -81,11 +89,68 @@ function broadcastSettlement(market: Market): void {
   for (const m of activeMembers(market.id)) hub.sendToUser(m.userId, msg);
 }
 
+// ---- early-freeze voting (creator proposes; ≥50% must agree) ----
+
+function getFreezeVotes(marketId: string): SettlementVote[] {
+  const rows = selectFreezeVotes.all(marketId) as unknown as {
+    user_id: string;
+    agree: number;
+    voted_at: number;
+  }[];
+  return rows.map((r) => ({ marketId, userId: r.user_id, agree: r.agree === 1, votedAt: r.voted_at }));
+}
+
+export function getFreezeInfo(marketId: string): FreezeInfo | null {
+  const market = getMarket(marketId);
+  if (!market || market.status !== 'open') return null;
+  const votes = getFreezeVotes(marketId);
+  if (votes.length === 0) return null; // no early freeze proposed
+  return { votes, required: requiredVotes(marketId), agreeCount: votes.filter((v) => v.agree).length };
+}
+
+function broadcastFreeze(marketId: string): void {
+  const msg = { type: 'freeze_update' as const, marketId, freeze: getFreezeInfo(marketId) };
+  hub.broadcast(marketId, msg);
+  for (const m of activeMembers(marketId)) hub.sendToUser(m.userId, msg);
+}
+
+/** Creator proposes ending the trading window early (their proposal counts as a vote). */
+export function requestFreeze(marketId: string, actorId: string): void {
+  const market = getMarket(marketId);
+  if (!market) throw new SettlementError('Market not found.');
+  if (market.creatorId !== actorId) throw new SettlementError('Only the creator can propose an early freeze.');
+  if (market.status !== 'open') throw new SettlementError('Trading is not open.');
+  deleteFreezeVotes.run(marketId);
+  upsertFreezeVote.run(marketId, actorId, 1, Date.now());
+  broadcastFreeze(marketId);
+  maybeFreeze(marketId);
+}
+
+/** A member agrees to (or rejects) freezing early. */
+export function voteFreeze(marketId: string, userId: string, agree: boolean): void {
+  const market = getMarket(marketId);
+  if (!market) throw new SettlementError('Market not found.');
+  if (market.status !== 'open') throw new SettlementError('Trading is not open.');
+  if (getFreezeVotes(marketId).length === 0) throw new SettlementError('No early freeze has been proposed.');
+  if (!activeMembers(marketId).some((m) => m.userId === userId)) {
+    throw new SettlementError('Only members can vote.');
+  }
+  upsertFreezeVote.run(marketId, userId, agree ? 1 : 0, Date.now());
+  broadcastFreeze(marketId);
+  maybeFreeze(marketId);
+}
+
+function maybeFreeze(marketId: string): void {
+  const info = getFreezeInfo(marketId);
+  if (info && info.agreeCount >= info.required) freezeMarket(marketId);
+}
+
 /** Freezes trading: cancels the book and moves the market to `frozen`. */
 export function freezeMarket(marketId: string): void {
   const market = getMarket(marketId);
   if (!market || market.status !== 'open') return;
   cancelAllOpenOrders(marketId);
+  deleteFreezeVotes.run(marketId);
   setMarketStatus(marketId, 'frozen');
   const updated = getMarket(marketId)!;
   hub.broadcast(marketId, { type: 'market_update', marketId, market: updated });

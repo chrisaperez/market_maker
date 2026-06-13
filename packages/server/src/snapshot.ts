@@ -9,7 +9,7 @@ import {
 import { getCash, getPositions } from './engine/ledger.js';
 import { getMarket } from './markets.js';
 import { listMembers, listPendingRequests } from './membership.js';
-import { getSettlementInfo } from './settlement.js';
+import { getFreezeInfo, getSettlementInfo } from './settlement.js';
 
 /** Full point-in-time view a client gets when it subscribes to a market. */
 export function buildSnapshot(marketId: string, userId: string): MarketSnapshot | null {
@@ -37,6 +37,7 @@ export function buildSnapshot(marketId: string, userId: string): MarketSnapshot 
     openOrders: getAllOpenOrders(marketId),
     holdings: getHoldings(marketId),
     pendingRequests: isCreator ? listPendingRequests(marketId) : [],
+    freeze: getFreezeInfo(marketId),
     settlement: getSettlementInfo(marketId),
   };
 }

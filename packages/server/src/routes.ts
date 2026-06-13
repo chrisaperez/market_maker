@@ -12,9 +12,17 @@ import {
   requestJoin,
   verifyInviteToken,
 } from './membership.js';
-import { createMarket, getMarket, listMarketsForUser } from './markets.js';
+import {
+  createMarket,
+  deleteDraft,
+  getMarket,
+  listMarketsForUser,
+  publishMarket,
+  updateMarketDraft,
+} from './markets.js';
 import { openMarket } from './engine/index.js';
-import { declareWinner, voteSettlement } from './settlement.js';
+import { declareWinner, requestFreeze, voteFreeze, voteSettlement } from './settlement.js';
+import { disableBot, enableBot } from './bot.js';
 
 export const router = Router();
 
@@ -58,11 +66,31 @@ router.get('/markets', (_req, res) => {
   res.json({ markets: listMarketsForUser(userIdOf(res)) });
 });
 
+router.patch('/markets/:id', (req, res) => {
+  const input = createSchema.parse(req.body);
+  const market = updateMarketDraft(String(req.params.id), userIdOf(res), input);
+  res.json({ market });
+});
+
+router.post('/markets/:id/publish', (req, res) => {
+  const market = publishMarket(String(req.params.id), userIdOf(res));
+  res.json({ market });
+});
+
+router.delete('/markets/:id', (req, res) => {
+  deleteDraft(String(req.params.id), userIdOf(res));
+  res.json({ ok: true });
+});
+
 /** Market detail. Full access for members; invite-token holders get meta only. */
 router.get('/markets/:id', (req: Request, res: Response) => {
   const userId = userIdOf(res);
   const market = getMarket(String(req.params.id));
   if (!market) return res.status(404).json({ error: 'Market not found.' });
+  // Drafts are private to their creator until published.
+  if (market.status === 'draft' && market.creatorId !== userId) {
+    return res.status(404).json({ error: 'Market not found.' });
+  }
 
   const membership = getMembership(market.id, userId);
   const invite = typeof req.query.invite === 'string' ? req.query.invite : '';
@@ -104,6 +132,24 @@ const voteSchema = z.object({ agree: z.boolean() });
 router.post('/markets/:id/vote', (req, res) => {
   const { agree } = voteSchema.parse(req.body);
   voteSettlement(String(req.params.id), userIdOf(res), agree);
+  res.json({ ok: true });
+});
+
+router.post('/markets/:id/freeze-request', (req, res) => {
+  requestFreeze(String(req.params.id), userIdOf(res));
+  res.json({ ok: true });
+});
+router.post('/markets/:id/freeze-vote', (req, res) => {
+  const { agree } = voteSchema.parse(req.body);
+  voteFreeze(String(req.params.id), userIdOf(res), agree);
+  res.json({ ok: true });
+});
+
+const botSchema = z.object({ enabled: z.boolean() });
+router.post('/markets/:id/bot', (req, res) => {
+  const { enabled } = botSchema.parse(req.body);
+  if (enabled) enableBot(String(req.params.id), userIdOf(res));
+  else disableBot(String(req.params.id), userIdOf(res));
   res.json({ ok: true });
 });
 

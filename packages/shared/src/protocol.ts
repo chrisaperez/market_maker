@@ -1,5 +1,6 @@
 // WebSocket message protocol between web client and server.
 import type {
+  FreezeInfo,
   Holding,
   JoinRequest,
   Market,
@@ -41,6 +42,7 @@ export interface MarketSnapshot {
   openOrders: Order[]; // every member's resting orders (transparent)
   holdings: Holding[]; // every member's shares + cash (transparent)
   pendingRequests: JoinRequest[]; // populated only for the creator
+  freeze: FreezeInfo | null; // present while an early-freeze vote is open
   settlement: SettlementInfo | null; // present once the window freezes
 }
 
@@ -57,6 +59,7 @@ export type ServerMessage =
   | { type: 'order_update'; marketId: string; order: Order }
   | { type: 'balance'; marketId: string; cashCents: number; positions: { optionId: string; shares: number }[] }
   | { type: 'holding_update'; marketId: string; holding: Holding }
+  | { type: 'freeze_update'; marketId: string; freeze: FreezeInfo | null }
   | { type: 'settlement_update'; marketId: string; market: Market; settlement: SettlementInfo };
 
 export const WS_PATH = '/ws';

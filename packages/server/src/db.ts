@@ -118,6 +118,17 @@ function addColumnIfMissing(table: string, column: string, definition: string): 
   }
 }
 addColumnIfMissing('markets', 'max_owe_pct', 'INTEGER NOT NULL DEFAULT 40');
+addColumnIfMissing('markets', 'bot_enabled', 'INTEGER NOT NULL DEFAULT 0');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS freeze_votes (
+    market_id  TEXT NOT NULL REFERENCES markets(id),
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    agree      INTEGER NOT NULL,
+    voted_at   INTEGER NOT NULL,
+    PRIMARY KEY (market_id, user_id)
+  );
+`);
 
 const nextSeqStmt = db.prepare(
   `UPDATE counters SET value = value + 1 WHERE name = 'order_seq' RETURNING value`,

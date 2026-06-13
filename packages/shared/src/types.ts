@@ -1,6 +1,7 @@
 // Shared domain types. All money is integer CENTS to avoid floating-point drift.
 
 export type MarketStatus =
+  | 'draft' // creator still editing; not shareable yet
   | 'lobby' // accepting members; trading not started
   | 'open' // trading window active
   | 'frozen' // window closed; awaiting settlement
@@ -35,6 +36,7 @@ export interface Market {
   parValueCents: number;
   windowSeconds: number;
   maxOwePct: number; // most a member may owe the ledger, as a % of their buy-in
+  botEnabled: boolean; // creator-toggled built-in liquidity bot
   status: MarketStatus;
   openedAt: number | null;
   closesAt: number | null;
@@ -111,6 +113,13 @@ export interface SettlementVote {
   userId: string;
   agree: boolean;
   votedAt: number;
+}
+
+/** Live state of an early-freeze proposal (creator proposes → members verify). */
+export interface FreezeInfo {
+  votes: SettlementVote[];
+  required: number; // agree votes needed (≥ 50% of active members)
+  agreeCount: number;
 }
 
 /** Live state of a market's settlement (winner declared → verification → finalized). */

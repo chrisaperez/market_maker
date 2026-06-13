@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   dollars,
   maxDebtCents,
+  type FreezeInfo,
   type Holding,
   type Market,
   type Member,
@@ -14,6 +15,7 @@ import { api } from '../lib/api';
 import { useApp } from '../lib/store';
 import { wsClient } from '../lib/ws';
 import { PriceChart } from './PriceChart';
+import { ScriptsPanel } from './ScriptsPanel';
 import { Sparkline } from './Sparkline';
 
 function booksFromArray(arr: OptionBook[]): Record<string, OptionBook> {
@@ -42,7 +44,8 @@ export function TradingRoom({
   const [myPos, setMyPos] = useState<Record<string, number>>({});
   const [openOrders, setOpenOrders] = useState<Order[]>([]);
   const [holdings, setHoldings] = useState<Holding[]>([]);
-  const [bottomTab, setBottomTab] = useState<'trades' | 'orders' | 'holdings'>('trades');
+  const [bottomTab, setBottomTab] = useState<'trades' | 'orders' | 'holdings' | 'scripts'>('trades');
+  const [freeze, setFreeze] = useState<FreezeInfo | null>(null);
   const [settlement, setSettlement] = useState<SettlementInfo | null>(null);
   const [flash, setFlash] = useState('');
   const flashTimer = useRef<number | null>(null);
@@ -69,9 +72,13 @@ export function TradingRoom({
           setMyPos(posFromArray(s.myPositions));
           setOpenOrders(s.openOrders);
           setHoldings(s.holdings);
+          setFreeze(s.freeze);
           setSettlement(s.settlement);
           break;
         }
+        case 'freeze_update':
+          setFreeze(msg.freeze);
+          break;
         case 'settlement_update':
           setMarket(msg.market);
           setSettlement(msg.settlement);
@@ -103,7 +110,10 @@ export function TradingRoom({
         }
         case 'market_update':
           setMarket(msg.market);
-          if (msg.market.status !== 'open') setOpenOrders([]); // book cleared on freeze
+          if (msg.market.status !== 'open') {
+            setOpenOrders([]); // book cleared on freeze
+            setFreeze(null);
+          }
           break;
         case 'error':
           showFlash(msg.message);
@@ -133,6 +143,14 @@ export function TradingRoom({
   const [selected, setSelected] = useState(market.options[0]?.id ?? '');
   const selectedTrades = useMemo(() => trades.filter((t) => t.optionId === selected), [trades, selected]);
 
+  // How much cash I can still commit to buys (for the shares slider's max).
+  const budgetCents = useMemo(() => {
+    const committed = openOrders
+      .filter((o) => o.userId === myUserId && o.side === 'buy')
+      .reduce((s, o) => s + o.remaining * o.priceCents, 0);
+    return myCash + maxDebtCents(market.buyInCents, market.maxOwePct) - committed;
+  }, [openOrders, myUserId, myCash, market.buyInCents, market.maxOwePct]);
+
   const place = (
     optionId: string,
     side: 'buy' | 'sell',
@@ -155,6 +173,13 @@ export function TradingRoom({
   // One-click "take": fill a resting order by crossing it with the opposite side.
   const take = (o: Order) =>
     place(o.optionId, o.side === 'sell' ? 'buy' : 'sell', o.priceCents, o.remaining, 'limit');
+  // Bridge for user scripts: price in dollars (or null = market order).
+  const scriptOrder = (optionId: string, side: 'buy' | 'sell', shares: number, price: number | null) => {
+    if (!Number.isFinite(shares) || shares <= 0) return;
+    const qty = Math.floor(shares);
+    if (price == null) place(optionId, side, 0, qty, 'market');
+    else place(optionId, side, Math.round(price * 100), qty, 'limit');
+  };
 
   const openMarket = async () => {
     try {
@@ -177,6 +202,27 @@ export function TradingRoom({
       showFlash((e as Error).message);
     }
   };
+  const proposeFreeze = async () => {
+    try {
+      await api.requestFreeze(marketId);
+    } catch (e) {
+      showFlash((e as Error).message);
+    }
+  };
+  const voteFreeze = async (agree: boolean) => {
+    try {
+      await api.voteFreeze(marketId, agree);
+    } catch (e) {
+      showFlash((e as Error).message);
+    }
+  };
+  const toggleBot = async () => {
+    try {
+      await api.setBot(marketId, !market.botEnabled);
+    } catch (e) {
+      showFlash((e as Error).message);
+    }
+  };
 
   // --- Pre-trading (lobby) ---
   if (market.status === 'lobby') {
@@ -194,6 +240,7 @@ export function TradingRoom({
             <button onClick={openMarket} className="btn-primary self-start px-5 py-2.5 text-base">
               Open market for trading
             </button>
+            <BotToggle enabled={market.botEnabled} onToggle={toggleBot} />
             {flash && <p className="text-sm text-amber-300">{flash}</p>}
           </div>
         ) : (
@@ -215,6 +262,19 @@ export function TradingRoom({
       )}
 
       {market.status === 'open' && market.closesAt != null && <Countdown closesAt={market.closesAt} />}
+
+      {market.status === 'open' && (
+        <FreezePanel
+          freeze={freeze}
+          isCreator={isCreator}
+          myUserId={myUserId}
+          nameOf={nameOf}
+          onPropose={proposeFreeze}
+          onVote={voteFreeze}
+        />
+      )}
+
+      {isCreator && market.status === 'open' && <BotToggle enabled={market.botEnabled} onToggle={toggleBot} />}
 
       {settlement && market.status !== 'open' && (
         <SettlementPanel
@@ -310,6 +370,8 @@ export function TradingRoom({
             book={books[o.id]}
             series={seriesByOption[o.id] ?? []}
             parCents={market.parValueCents}
+            budgetCents={budgetCents}
+            heldShares={myPos[o.id] ?? 0}
             canTrade={market.status === 'open'}
             onPlace={(side, price, qty, orderType) => place(o.id, side, price, qty, orderType)}
           />
@@ -324,6 +386,7 @@ export function TradingRoom({
               ['trades', 'Trade log'],
               ['orders', 'Open orders'],
               ['holdings', 'Holdings'],
+              ['scripts', 'Scripts'],
             ] as const
           ).map(([key, label]) => (
             <button
@@ -394,6 +457,19 @@ export function TradingRoom({
 
         {bottomTab === 'holdings' && (
           <HoldingsTab holdings={holdings} options={market.options} myUserId={myUserId} nameOf={nameOf} />
+        )}
+
+        {bottomTab === 'scripts' && (
+          <ScriptsPanel
+            options={market.options}
+            books={books}
+            positions={myPos}
+            cashCents={myCash}
+            trades={trades}
+            canTrade={market.status === 'open'}
+            onOrder={scriptOrder}
+            onCancel={cancel}
+          />
         )}
       </section>
     </div>
@@ -514,6 +590,26 @@ function HoldingsTab({
   );
 }
 
+function BotToggle({ enabled, onToggle }: { enabled: boolean; onToggle: () => void }) {
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm">
+      <span className="text-white/70">
+        🤖 Liquidity bot {enabled ? '— quoting both sides' : 'is off'}
+      </span>
+      <button
+        onClick={onToggle}
+        className={`rounded-md px-3 py-1 text-xs font-medium transition ${
+          enabled
+            ? 'bg-orange-500 text-black hover:bg-orange-400'
+            : 'border border-white/15 text-white/70 hover:text-white'
+        }`}
+      >
+        {enabled ? 'Turn off' : 'Turn on'}
+      </button>
+    </div>
+  );
+}
+
 function Countdown({ closesAt }: { closesAt: number }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -536,6 +632,78 @@ function Countdown({ closesAt }: { closesAt: number }) {
         {remaining === 0 ? 'closing…' : `${mm}:${String(ss).padStart(2, '0')} left`}
       </span>
     </div>
+  );
+}
+
+function FreezePanel({
+  freeze,
+  isCreator,
+  myUserId,
+  nameOf,
+  onPropose,
+  onVote,
+}: {
+  freeze: FreezeInfo | null;
+  isCreator: boolean;
+  myUserId: string | null;
+  nameOf: (id: string) => string;
+  onPropose: () => void;
+  onVote: (agree: boolean) => void;
+}) {
+  if (!freeze) {
+    if (!isCreator) return null;
+    return (
+      <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm">
+        <span className="text-white/55">Want to end trading early?</span>
+        <button
+          onClick={onPropose}
+          className="rounded-md border border-orange-500/50 px-3 py-1 text-xs font-medium text-orange-300 transition hover:bg-orange-500/15"
+        >
+          Propose freeze (needs ≥50%)
+        </button>
+      </div>
+    );
+  }
+  const myVote = freeze.votes.find((v) => v.userId === myUserId);
+  return (
+    <section className="card border-amber-500/30 bg-amber-500/[0.05] p-4">
+      <h2 className="mb-1 font-medium text-amber-200">Early freeze proposed</h2>
+      <p className="mb-3 text-sm text-white/60">
+        {freeze.agreeCount} of {freeze.required} needed agree to stop trading now and move to
+        settlement.
+      </p>
+      <div className="mb-3 h-2 overflow-hidden rounded-full bg-white/10">
+        <div
+          className="h-full bg-amber-500 transition-all"
+          style={{ width: `${Math.min(100, (freeze.agreeCount / freeze.required) * 100)}%` }}
+        />
+      </div>
+      {!myVote || !myVote.agree ? (
+        <div className="flex gap-2">
+          <button
+            onClick={() => onVote(true)}
+            className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-black transition hover:bg-amber-400"
+          >
+            Agree to freeze
+          </button>
+          <button onClick={() => onVote(false)} className="btn-ghost">
+            Keep trading
+          </button>
+        </div>
+      ) : (
+        <p className="text-sm text-amber-300">You agreed to freeze. Waiting on others…</p>
+      )}
+      <div className="mt-3 flex flex-wrap gap-1.5 text-xs">
+        {freeze.votes.map((v) => (
+          <span
+            key={v.userId}
+            className={`rounded-full px-2 py-0.5 ${v.agree ? 'bg-emerald-500/20 text-emerald-300' : 'bg-white/10 text-white/50'}`}
+          >
+            {v.agree ? '✓' : '·'} @{nameOf(v.userId)}
+          </span>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -705,6 +873,8 @@ function OptionCard({
   book,
   series,
   parCents,
+  budgetCents,
+  heldShares,
   canTrade,
   onPlace,
 }: {
@@ -712,6 +882,8 @@ function OptionCard({
   book: OptionBook | undefined;
   series: number[];
   parCents: number;
+  budgetCents: number;
+  heldShares: number;
   canTrade: boolean;
   onPlace: (side: 'buy' | 'sell', priceCents: number, quantity: number, orderType: 'limit' | 'market') => void;
 }) {
@@ -726,6 +898,13 @@ function OptionCard({
   const down = last != null && prev != null && last < prev;
   const bestBid = book?.bids[0]?.priceCents ?? null;
   const bestAsk = book?.asks[0]?.priceCents ?? null;
+
+  // Slider bounds: price spans 1¢→par; shares span 1→(what you can afford/hold).
+  const priceCentsVal = Math.min(parCents, Math.max(1, Math.round(parseFloat(priceStr) * 100) || 1));
+  const refPrice = mode === 'market' ? (side === 'buy' ? (bestAsk ?? parCents) : 1) : priceCentsVal;
+  const maxShares =
+    side === 'sell' ? Math.max(1, heldShares) : Math.max(1, Math.floor(budgetCents / Math.max(1, refPrice)));
+  const qtyVal = Math.min(maxShares, Math.max(1, parseInt(qtyStr, 10) || 1));
 
   const submit = () => {
     const quantity = parseInt(qtyStr, 10);
@@ -831,6 +1010,43 @@ function OptionCard({
               className={`${mode === 'limit' ? 'w-1/2' : 'w-full'} rounded-md border border-white/10 bg-black/40 px-2.5 py-1.5 text-sm outline-none transition focus:border-orange-500/70`}
             />
           </div>
+
+          {/* Sliders for quick price + share selection */}
+          {mode === 'limit' && (
+            <div>
+              <div className="flex justify-between text-[11px] text-white/40">
+                <span>Price</span>
+                <span>{priceStr ? `$${priceStr}` : `—`}</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={parCents}
+                step={1}
+                value={priceCentsVal}
+                onChange={(e) => setPriceStr((Number(e.target.value) / 100).toFixed(2))}
+                className="w-full accent-orange-500"
+              />
+            </div>
+          )}
+          <div>
+            <div className="flex justify-between text-[11px] text-white/40">
+              <span>Shares</span>
+              <span>
+                {qtyStr || '0'} / {maxShares} max
+              </span>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={Math.max(1, maxShares)}
+              step={1}
+              value={qtyVal}
+              onChange={(e) => setQtyStr(String(e.target.value))}
+              className="w-full accent-orange-500"
+            />
+          </div>
+
           {mode === 'limit' && (
             <div className="flex items-center justify-between text-xs text-white/40">
               <button
